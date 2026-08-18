@@ -78,6 +78,21 @@ def main(path: str) -> int:
             if patch not in have:
                 sources.append({"type": "patch", "path": patch})
 
+        # 2a. Features Arch's package has that the Flathub build leaves off. All
+        # four dev packages are present in org.freedesktop.Sdk 25.08 (libva 1.22,
+        # libusb 1.0.29, icu 77.1, libjpeg 3.1.4), so no extra modules are needed.
+        # CHANNEL_URBDRC alone is not enough for USB redirection -- the client
+        # subsystem has its own flag, which is why the manifest's existing
+        # -DCHANNEL_URBDRC:BOOL=ON produced a build with no libusb linked at all.
+        for extra in (
+            "-DWITH_VAAPI:BOOL=ON",            # hardware H.264 decode
+            "-DCHANNEL_URBDRC_CLIENT:BOOL=ON",  # USB redirection (/usb:)
+            "-DWITH_ICU:BOOL=ON",              # ICU instead of the builtin unicode
+            "-DWITH_JPEG:BOOL=ON",
+        ):
+            if extra not in module["config-opts"]:
+                module["config-opts"].append(extra)
+
         # 2. FUSE is what makes clipboard *file* transfer work
         opts = module.setdefault("config-opts", [])
         module["config-opts"] = [
