@@ -1,0 +1,24 @@
+#!/bin/sh
+# Shadows /app/bin/fusermount3.
+#
+# Mounting FUSE needs a setuid-root helper, and flatpak strips setuid bits, so
+# the in-sandbox fusermount3 always fails with "Operation not permitted". libfuse
+# locates the helper with posix_spawnp() -- a PATH lookup -- so this script can
+# stand in for it and run the *host's* setuid copy through flatpak-spawn.
+#
+# libfuse gets the /dev/fuse descriptor back over a socketpair whose number it
+# passes in $_FUSE_COMMFD (and $_FUSE_COMMFD2 for the newer handoff), so those
+# descriptors have to be forwarded to the host process for the handoff to work.
+#
+# The resulting mount lives in the host mount namespace while FreeRDP, inside the
+# sandbox, remains the FUSE server holding the descriptor. That is fine: FUSE
+# does not require the server to share the mount namespace, and the application
+# pasting the files is a host application anyway.
+set -eu
+
+fwd=""
+[ -n "${_FUSE_COMMFD:-}" ]  && fwd="$fwd --forward-fd=$_FUSE_COMMFD  --env=_FUSE_COMMFD=$_FUSE_COMMFD"
+[ -n "${_FUSE_COMMFD2:-}" ] && fwd="$fwd --forward-fd=$_FUSE_COMMFD2 --env=_FUSE_COMMFD2=$_FUSE_COMMFD2"
+
+# shellcheck disable=SC2086
+exec flatpak-spawn --host $fwd fusermount3 "$@"
