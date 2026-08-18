@@ -7,7 +7,10 @@ track the latest upstream FreeRDP release rather than pinning one ourselves.
 import json
 import sys
 
-PATCH = "patches/0001-sdl3-size-desktop-from-mapped-window.patch"
+PATCHES = [
+    "patches/0001-sdl3-size-desktop-from-mapped-window.patch",
+    "patches/0002-sdl3-multimon-per-monitor-scale.patch",
+]
 
 # The freedesktop SDK ships no fuse3, which is why Flathub builds FreeRDP with
 # WITH_FUSE=OFF. Build libfuse ourselves so clipboard file transfer can be
@@ -49,8 +52,10 @@ def main(path: str) -> int:
 
         # 1. our patch, applied on top of the upstream release tarball
         sources = module.setdefault("sources", [])
-        if not any(s.get("path") == PATCH for s in sources if isinstance(s, dict)):
-            sources.append({"type": "patch", "path": PATCH})
+        have = {s.get("path") for s in sources if isinstance(s, dict)}
+        for patch in PATCHES:
+            if patch not in have:
+                sources.append({"type": "patch", "path": patch})
 
         # 2. FUSE is what makes clipboard *file* transfer work
         opts = module.setdefault("config-opts", [])
@@ -74,7 +79,7 @@ def main(path: str) -> int:
         json.dump(manifest, fh, indent=4)
         fh.write("\n")
 
-    print(f"patched {path}: +fuse3 module, +{PATCH}, WITH_FUSE=ON, "
+    print(f"patched {path}: +fuse3 module, +{len(PATCHES)} patches, WITH_FUSE=ON, "
           "+--device=all +--filesystem=home")
     return 0
 
