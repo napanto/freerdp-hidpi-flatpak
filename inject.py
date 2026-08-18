@@ -8,8 +8,7 @@ import json
 import sys
 
 PATCHES = [
-    "patches/0001-sdl3-size-desktop-from-mapped-window.patch",
-    "patches/0002-sdl3-multimon-per-monitor-scale.patch",
+    "patches/0001-sdl3-device-space-monitor-layout.patch",
 ]
 
 # The freedesktop SDK ships no fuse3, which is why Flathub builds FreeRDP with
