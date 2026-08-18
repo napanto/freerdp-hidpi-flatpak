@@ -1,0 +1,331 @@
+From: Antonio Napolitano <anton@polit.no>
+Subject: [PATCH] client/SDL3: build the monitor layout in device pixels
+
+The SDL3 client renders 1:1 into device pixels, but describes the monitors to the
+server in the compositor's logical coordinates, so on a scaled output the session
+is created at 1/scale of the panel and the picture is upscaled.
+
+The size was taken from SDL_GetWindowDisplayScale()/SDL_GetDisplayContentScale(),
+which report the user's preferred UI scaling -- 1.0 on a fractionally scaled
+Wayland output even when it really is 1.5x -- and an unmapped window cannot learn
+the true scale at all, wp_fractional_scale_v1 being per-surface. The value wanted
+is SDL_DisplayMode::pixel_density, the pixel-to-logical ratio, which SDL derives
+from wl_output's logical size and is available per display with no surface at all.
+
+Use it for the monitor size and the DPI, so the definition is correct before the
+connection is made rather than needing a DisplayControl round-trip afterwards.
+
+The positions then have to move to the same space. They cannot be scaled by one
+factor -- with mixed scales the monitors grow by different amounts and gaps or
+overlaps appear -- so each is placed flush against an already-placed logical
+neighbour, aligning the centres of the shared edge, which halves the unavoidable
+mismatch. Window creation keeps using the logical bounds, since SDL windows are
+sized in points.
+
+Signed-off-by: Antonio Napolitano <anton@polit.no>
+---
+--- a/client/SDL/SDL3/sdl_window.cpp
++++ b/client/SDL/SDL3/sdl_window.cpp
+@@ -369,7 +369,35 @@
+ 		return {};
+ 
+ 	const auto& r = rect(window, forceAsPrimary);
+-	const float factor = SDL_GetWindowDisplayScale(window);
++
++	/* Take the size and DPI from the display, not from this window.
++	 *
++	 * SDL_GetWindowDisplayScale()/SDL_GetDisplayContentScale() report the user's
++	 * preferred UI scaling, which on a fractionally scaled Wayland output is 1.0
++	 * even when the output really is 1.5x -- and a window that is not mapped yet
++	 * cannot learn the true scale at all, because wp_fractional_scale_v1 is a
++	 * per-surface protocol. The pixel-to-logical ratio is a different value,
++	 * SDL_DisplayMode::pixel_density, which SDL derives from wl_output's logical
++	 * size and is therefore available per display with no surface involved.
++	 *
++	 * Using it means the monitor definition carries DEVICE pixels and the real
++	 * DPI from the start, so the session is created at the panel's resolution
++	 * instead of the compositor's logical size.
++	 */
++	float factor = SDL_GetWindowDisplayScale(window);
++	INT32 width = r.w;
++	INT32 height = r.h;
++
++	SDL_Rect bounds = {};
++	const auto* mode = SDL_GetDesktopDisplayMode(id);
++	const float density = (mode != nullptr) ? mode->pixel_density : 0.0f;
++	if ((density > 0.0f) && SDL_GetDisplayBounds(id, &bounds) && (bounds.w > 0) && (bounds.h > 0))
++	{
++		width = static_cast<INT32>(std::lroundf(static_cast<float>(bounds.w) * density));
++		height = static_cast<INT32>(std::lroundf(static_cast<float>(bounds.h) * density));
++		factor = density;
++	}
++
+ 	const float dpi = std::roundf(factor * 100.0f);
+ 
+ 	WINPR_ASSERT(r.w > 0);
+@@ -383,14 +411,14 @@
+ 	monitor.orig_screen = id;
+ 	monitor.x = r.x;
+ 	monitor.y = r.y;
+-	monitor.width = r.w;
+-	monitor.height = r.h;
++	monitor.width = width;
++	monitor.height = height;
+ 	monitor.is_primary = forceAsPrimary || (id == primary);
+ 	monitor.attributes.desktopScaleFactor = static_cast<UINT32>(dpi);
+ 	monitor.attributes.deviceScaleFactor = 100;
+ 	monitor.attributes.orientation = rdp_orientation;
+-	monitor.attributes.physicalWidth = WINPR_ASSERTING_INT_CAST(uint32_t, r.w);
+-	monitor.attributes.physicalHeight = WINPR_ASSERTING_INT_CAST(uint32_t, r.h);
++	monitor.attributes.physicalWidth = WINPR_ASSERTING_INT_CAST(uint32_t, width);
++	monitor.attributes.physicalHeight = WINPR_ASSERTING_INT_CAST(uint32_t, height);
+ 
+ 	const auto cat = SDL_LOG_CATEGORY_APPLICATION;
+ 	SDL_LogDebug(cat, "monitor.orig_screen                   %" PRIu32, monitor.orig_screen);
+--- a/client/SDL/SDL3/sdl_monitor.hpp
++++ b/client/SDL/SDL3/sdl_monitor.hpp
+@@ -19,6 +19,8 @@
+ 
+ #pragma once
+ 
++#include <vector>
++
+ #include <freerdp/api.h>
+ #include <freerdp/freerdp.h>
+ 
+@@ -26,3 +28,8 @@
+ 
+ [[nodiscard]] int sdl_list_monitors(SdlContext* sdl);
+ [[nodiscard]] BOOL sdl_detect_monitors(SdlContext* sdl, UINT32* pMaxWidth, UINT32* ppMaxHeight);
++
++/* Convert monitor positions from the compositor's logical coordinates into the
++ * device space the sizes use. Shared, because the layout is rebuilt from the
++ * windows after connecting and has to land in the same coordinate space. */
++void sdl_monitors_to_device_space(std::vector<rdpMonitor>& monitors);
+--- a/client/SDL/SDL3/sdl_monitor.cpp
++++ b/client/SDL/SDL3/sdl_monitor.cpp
+@@ -26,6 +26,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <algorithm>
++#include <vector>
+ 
+ #include <SDL3/SDL.h>
+ 
+@@ -172,6 +173,161 @@
+ 	return TRUE;
+ }
+ 
++/* Convert the monitor positions from the compositor's LOGICAL coordinates into the
++ * DEVICE space the sizes are now expressed in (see SdlWindow::query).
++ *
++ * They cannot simply be scaled by one factor: with mixed scales the monitors grow
++ * by different amounts, so gaps or overlaps appear and the layout is rejected.
++ * Place each monitor flush against an already-placed logical neighbour instead,
++ * which preserves which side it sits on. RDP only requires the primary at 0/0 and
++ * every monitor touching another -- the desktop may be non-rectangular, exactly
++ * like a local multi-monitor setup.
++ *
++ * Neighbours at different scales cannot line up along their whole shared edge:
++ * the same physical span needs a different number of device pixels on each, so the
++ * mismatch grows linearly whatever offset is chosen. Aligning the centres of the
++ * overlap splits it symmetrically, halving the worst case and putting zero error
++ * where the pointer usually crosses.
++ */
++void sdl_monitors_to_device_space(std::vector<rdpMonitor>& monitors)
++{
++	const size_t count = monitors.size();
++	if (count == 0)
++		return;
++
++	/* Decide the primary first, and make the flags agree.
++	 *
++	 * Every SdlWindow caches its monitor built with forceAsPrimary=true
++	 * (SdlWindow::SdlWindow -> query(_window, id, true)), so a layout rebuilt from
++	 * the windows has EVERY entry claiming to be primary. MS-RDPEDISP 2.2.2.2
++	 * allows exactly one and the server discards a layout carrying more, which
++	 * silently costs the per-monitor DPI. Prefer the display SDL considers
++	 * primary, else the first one flagged, else the first entry. */
++	size_t primary = count;
++	const auto sdlPrimary = SDL_GetPrimaryDisplay();
++	for (size_t i = 0; i < count; i++)
++	{
++		if (monitors[i].orig_screen == sdlPrimary)
++		{
++			primary = i;
++			break;
++		}
++	}
++	if (primary == count)
++	{
++		for (size_t i = 0; i < count; i++)
++		{
++			if (monitors[i].is_primary)
++			{
++				primary = i;
++				break;
++			}
++		}
++	}
++	if (primary == count)
++		primary = 0;
++
++	for (size_t i = 0; i < count; i++)
++		monitors[i].is_primary = (i == primary);
++
++	std::vector<SDL_Rect> logical(count);
++	for (size_t i = 0; i < count; i++)
++	{
++		SDL_Rect b = {};
++		const auto id = WINPR_ASSERTING_INT_CAST(SDL_DisplayID, monitors[i].orig_screen);
++		if (!SDL_GetDisplayBounds(id, &b) || (b.w <= 0) || (b.h <= 0))
++			return; /* cannot map reliably, leave the positions alone */
++		logical[i] = b;
++	}
++
++	std::vector<bool> placed(count, false);
++	monitors[primary].x = 0;
++	monitors[primary].y = 0;
++	placed[primary] = true;
++
++	for (size_t done = 1; done < count; done++)
++	{
++		size_t best = count;
++		size_t parent = count;
++		INT64 bestDist = 0;
++
++		for (size_t m = 0; m < count; m++)
++		{
++			if (placed[m])
++				continue;
++
++			for (size_t q = 0; q < count; q++)
++			{
++				if (!placed[q])
++					continue;
++
++				const INT64 dx = static_cast<INT64>(logical[m].x) - logical[q].x;
++				const INT64 dy = static_cast<INT64>(logical[m].y) - logical[q].y;
++				const INT64 dist = (dx * dx) + (dy * dy);
++				if ((best == count) || (dist < bestDist))
++				{
++					best = m;
++					parent = q;
++					bestDist = dist;
++				}
++			}
++		}
++
++		if ((best == count) || (parent == count))
++			break;
++
++		const SDL_Rect& pl = logical[parent];
++		const SDL_Rect& ml = logical[best];
++		const auto fw = [](INT32 v) { return static_cast<float>(v); };
++		const float sx = fw(monitors[parent].width) / fw(pl.w);
++		const float sy = fw(monitors[parent].height) / fw(pl.h);
++		const float cxr = fw(monitors[best].width) / fw(ml.w);
++		const float cyr = fw(monitors[best].height) / fw(ml.h);
++
++		INT32 offX = static_cast<INT32>(std::lroundf(fw(ml.x - pl.x) * sx));
++		INT32 offY = static_cast<INT32>(std::lroundf(fw(ml.y - pl.y) * sy));
++
++		const auto loX = std::max(ml.x, pl.x);
++		const auto hiX = std::min(ml.x + ml.w, pl.x + pl.w);
++		if (hiX > loX)
++		{
++			const float mid = fw(loX + hiX) / 2.0f;
++			offX = static_cast<INT32>(std::lroundf((mid - fw(pl.x)) * sx - (mid - fw(ml.x)) * cxr));
++		}
++
++		const auto loY = std::max(ml.y, pl.y);
++		const auto hiY = std::min(ml.y + ml.h, pl.y + pl.h);
++		if (hiY > loY)
++		{
++			const float mid = fw(loY + hiY) / 2.0f;
++			offY = static_cast<INT32>(std::lroundf((mid - fw(pl.y)) * sy - (mid - fw(ml.y)) * cyr));
++		}
++
++		if (ml.x >= (pl.x + pl.w)) /* right of parent */
++		{
++			monitors[best].x = monitors[parent].x + monitors[parent].width;
++			monitors[best].y = monitors[parent].y + offY;
++		}
++		else if ((ml.x + ml.w) <= pl.x) /* left of parent */
++		{
++			monitors[best].x = monitors[parent].x - monitors[best].width;
++			monitors[best].y = monitors[parent].y + offY;
++		}
++		else if (ml.y >= (pl.y + pl.h)) /* below parent */
++		{
++			monitors[best].y = monitors[parent].y + monitors[parent].height;
++			monitors[best].x = monitors[parent].x + offX;
++		}
++		else /* above parent */
++		{
++			monitors[best].y = monitors[parent].y - monitors[best].height;
++			monitors[best].x = monitors[parent].x + offX;
++		}
++
++		placed[best] = true;
++	}
++}
++
+ [[nodiscard]] static BOOL sdl_apply_display_properties(SdlContext* sdl)
+ {
+ 	WINPR_ASSERT(sdl);
+@@ -209,6 +365,18 @@
+ 	if (!monitors.empty() && std::none_of(monitors.cbegin(), monitors.cend(),
+ 	                                      [](const rdpMonitor& m) { return m.is_primary; }))
+ 		monitors.at(0).is_primary = true;
++
++	sdl_monitors_to_device_space(monitors);
++
++	/* Per-monitor attributes -- including the desktopScaleFactor computed above --
++	 * are only put on the wire at connect time if this flag is set:
++	 * gcc_write_client_monitor_extended_data() wraps the whole CS_MONITOR_EX block
++	 * in `if (settings->HasMonitorAttributes)`. Nothing on the client side sets it,
++	 * so the DPI silently never reached the server and the session came up
++	 * unscaled, even though the monitor definitions carried the right value. */
++	if (!freerdp_settings_set_bool(settings, FreeRDP_HasMonitorAttributes, TRUE))
++		return FALSE;
++
+ 	return freerdp_settings_set_monitor_def_array_sorted(settings, monitors.data(),
+ 	                                                     monitors.size());
+ }
+--- a/client/SDL/SDL3/sdl_context.cpp
++++ b/client/SDL/SDL3/sdl_context.cpp
+@@ -397,8 +397,20 @@
+ 		auto monitor = static_cast<rdpMonitor*>(
+ 		    freerdp_settings_get_pointer_array_writable(settings, FreeRDP_MonitorDefArray, x));
+ 
++		/* monitor->width/height are DEVICE pixels (see SdlWindow::query), but a
++		 * window is created in logical points, so take the size from the display
++		 * bounds instead. */
+ 		Uint32 w = WINPR_ASSERTING_INT_CAST(Uint32, monitor->width);
+ 		Uint32 h = WINPR_ASSERTING_INT_CAST(Uint32, monitor->height);
++		{
++			SDL_Rect bounds = {};
++			if (SDL_GetDisplayBounds(WINPR_ASSERTING_INT_CAST(SDL_DisplayID, id), &bounds) &&
++			    (bounds.w > 0) && (bounds.h > 0))
++			{
++				w = WINPR_ASSERTING_INT_CAST(Uint32, bounds.w);
++				h = WINPR_ASSERTING_INT_CAST(Uint32, bounds.h);
++			}
++		}
+ 		if (!(freerdp_settings_get_bool(settings, FreeRDP_UseMultimon) ||
+ 		      freerdp_settings_get_bool(settings, FreeRDP_Fullscreen)))
+ 		{
+@@ -458,6 +470,12 @@
+ 	    std::none_of(list.cbegin(), list.cend(), [](const rdpMonitor& m) { return m.is_primary; }))
+ 		list.at(0).is_primary = true;
+ 
++	/* SdlWindow::monitor() reports logical positions, so without this the layout
++	 * rebuilt here would silently replace the device-space one computed at
++	 * enumeration, and everything downstream -- including the DisplayControl
++	 * resize -- would describe the monitors in the wrong coordinate space. */
++	sdl_monitors_to_device_space(list);
++
+ 	return freerdp_settings_set_monitor_def_array_sorted(context()->settings, list.data(),
+ 	                                                     list.size());
+ }

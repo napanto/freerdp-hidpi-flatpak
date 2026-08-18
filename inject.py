@@ -7,7 +7,9 @@ track the latest upstream FreeRDP release rather than pinning one ourselves.
 import json
 import sys
 
-PATCH = "patches/0001-sdl3-size-desktop-from-mapped-window.patch"
+PATCHES = [
+    "patches/0001-sdl3-device-space-monitor-layout.patch",
+]
 
 # The freedesktop SDK ships no fuse3, which is why Flathub builds FreeRDP with
 # WITH_FUSE=OFF. Build libfuse ourselves so clipboard file transfer can be
@@ -70,8 +72,25 @@ def main(path: str) -> int:
 
         # 1. our patch, applied on top of the upstream release tarball
         sources = module.setdefault("sources", [])
-        if not any(s.get("path") == PATCH for s in sources if isinstance(s, dict)):
-            sources.append({"type": "patch", "path": PATCH})
+        have = {s.get("path") for s in sources if isinstance(s, dict)}
+        for patch in PATCHES:
+            if patch not in have:
+                sources.append({"type": "patch", "path": patch})
+
+        # 2a. Features Arch's package has that the Flathub build leaves off. All
+        # four dev packages are present in org.freedesktop.Sdk 25.08 (libva 1.22,
+        # libusb 1.0.29, icu 77.1, libjpeg 3.1.4), so no extra modules are needed.
+        # CHANNEL_URBDRC alone is not enough for USB redirection -- the client
+        # subsystem has its own flag, which is why the manifest's existing
+        # -DCHANNEL_URBDRC:BOOL=ON produced a build with no libusb linked at all.
+        for extra in (
+            "-DWITH_VAAPI:BOOL=ON",            # hardware H.264 decode
+            "-DCHANNEL_URBDRC_CLIENT:BOOL=ON",  # USB redirection (/usb:)
+            "-DWITH_ICU:BOOL=ON",              # ICU instead of the builtin unicode
+            "-DWITH_JPEG:BOOL=ON",
+        ):
+            if extra not in module["config-opts"]:
+                module["config-opts"].append(extra)
 
         # 2. FUSE is what makes clipboard *file* transfer work
         opts = module.setdefault("config-opts", [])
@@ -102,8 +121,9 @@ def main(path: str) -> int:
         json.dump(manifest, fh, indent=4)
         fh.write("\n")
 
-    print(f"patched {path}: +fuse3 module, +{PATCH}, WITH_FUSE=ON, "
-          "+fuse-host-bridge, +--talk-name=org.freedesktop.Flatpak")
+    print(f"patched {path}: +fuse3 +fuse-host-bridge, +{len(PATCHES)} patches, "
+          "WITH_FUSE=ON, +--device=all +--filesystem=home "
+          "+--talk-name=org.freedesktop.Flatpak")
     return 0
 
 if __name__ == "__main__":
