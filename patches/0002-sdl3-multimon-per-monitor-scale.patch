@@ -63,10 +63,65 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  #include <cmath>
  #include <vector>
  #include <winpr/sysinfo.h>
-@@ -197,61 +198,140 @@
+@@ -197,61 +198,169 @@
  	std::vector<DISPLAY_CONTROL_MONITOR_LAYOUT> layouts;
  	layouts.reserve(nmonitors);
  
++	/* MS-RDPEDISP 2.2.2.2 allows exactly one DISPLAY_CONTROL_MONITOR_PRIMARY. The
++	 * cached SDL monitor definitions can carry the flag on more than one entry,
++	 * and the server then discards the entire layout -- observed as a /multimon
++	 * session staying at the initial logical size while a correct-looking layout
++	 * was being sent. Pick the primary deterministically: the monitor placed at
++	 * the origin above, else the first one flagged, else the first entry. */
++	size_t primaryIdx = 0;
++	bool primaryFound = false;
+ 	for (size_t i = 0; i < nmonitors; i++)
+ 	{
+-		auto monitor = &monitors[i];
+-		DISPLAY_CONTROL_MONITOR_LAYOUT layout = {};
++		if ((dev[i].x == 0) && (dev[i].y == 0))
++		{
++			primaryIdx = i;
++			primaryFound = true;
++			break;
++		}
++	}
++	if (!primaryFound)
++	{
++		for (size_t i = 0; i < nmonitors; i++)
++		{
++			if (monitors[i].is_primary)
++			{
++				primaryIdx = i;
++				break;
++			}
++		}
++	}
+ 
+-		/* FreeRDP_MonitorDefArray is enumerated through unmapped dummy windows
+-		 * (SdlWindow::query() -> createDummy()). wp_fractional_scale_v1 is a
+-		 * PER-SURFACE protocol: an unmapped surface never receives the compositor's
+-		 * preferred fractional scale, so SDL falls back to the wl_output integer
+-		 * scale (1). On a fractionally scaled output the monitor definition then
+-		 * carries the LOGICAL size and a desktopScaleFactor of 100. The remote
+-		 * desktop is created at 1/scale of the panel -- a 3840x2160 output at scale
+-		 * 1.5 yields a 2560x1440 session covering 2/3 of each axis -- and Windows is
+-		 * told to use 100% DPI regardless of the real scale.
+-		 *
+-		 * The mapped window does carry the fractional scale. Take both the size
+-		 * (SdlWindow::rect() -> SDL_GetWindowSizeInPixels) and the DPI
+-		 * (SdlWindow::scale() -> SDL_GetWindowDisplayScale) from it, so the
+-		 * DisplayControl resize requests true device pixels and a DPI matching the
+-		 * monitor. An explicit /scale-desktop: still wins via MonitorOverrideFlags
+-		 * below.
+-		 *
+-		 * Restricted to the single-monitor case; multimon would need a per-monitor
+-		 * window lookup and is left untouched.
+-		 */
+-		auto width = monitor->width;
+-		auto height = monitor->height;
+-		auto desktopScale = monitor->attributes.desktopScaleFactor;
+-		if (nmonitors == 1)
 +	/* Device-pixel geometry per monitor.
 +	 *
 +	 * RDP carries a single device-pixel coordinate space: the primary monitor
@@ -96,10 +151,8 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +	std::vector<float> scales(nmonitors, 0.0f);
 +	bool devValid = true;
 +
- 	for (size_t i = 0; i < nmonitors; i++)
- 	{
--		auto monitor = &monitors[i];
--		DISPLAY_CONTROL_MONITOR_LAYOUT layout = {};
++	for (size_t i = 0; i < nmonitors; i++)
++	{
 +		auto* window = (nmonitors == 1) ? _sdl->getFirstWindow()
 +		                               : _sdl->getWindowForDisplay(monitors[i].orig_screen);
 +		if (!window)
@@ -111,7 +164,8 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +		const auto r = window->rect();
 +		const auto scale = window->scale();
 +		if ((r.w <= 0) || (r.h <= 0) || (scale <= 0.0f))
-+		{
+ 		{
+-			if (auto* window = _sdl->getFirstWindow())
 +			devValid = false;
 +			break;
 +		}
@@ -153,50 +207,9 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +					return monitors[a].x < monitors[b].x;
 +				return monitors[a].y < monitors[b].y;
 +			});
- 
--		/* FreeRDP_MonitorDefArray is enumerated through unmapped dummy windows
--		 * (SdlWindow::query() -> createDummy()). wp_fractional_scale_v1 is a
--		 * PER-SURFACE protocol: an unmapped surface never receives the compositor's
--		 * preferred fractional scale, so SDL falls back to the wl_output integer
--		 * scale (1). On a fractionally scaled output the monitor definition then
--		 * carries the LOGICAL size and a desktopScaleFactor of 100. The remote
--		 * desktop is created at 1/scale of the panel -- a 3840x2160 output at scale
--		 * 1.5 yields a 2560x1440 session covering 2/3 of each axis -- and Windows is
--		 * told to use 100% DPI regardless of the real scale.
--		 *
--		 * The mapped window does carry the fractional scale. Take both the size
--		 * (SdlWindow::rect() -> SDL_GetWindowSizeInPixels) and the DPI
--		 * (SdlWindow::scale() -> SDL_GetWindowDisplayScale) from it, so the
--		 * DisplayControl resize requests true device pixels and a DPI matching the
--		 * monitor. An explicit /scale-desktop: still wins via MonitorOverrideFlags
--		 * below.
--		 *
--		 * Restricted to the single-monitor case; multimon would need a per-monitor
--		 * window lookup and is left untouched.
--		 */
--		auto width = monitor->width;
--		auto height = monitor->height;
--		auto desktopScale = monitor->attributes.desktopScaleFactor;
--		if (nmonitors == 1)
++
 +			INT32 cursor = 0;
 +			for (const auto idx : order)
-+			{
-+				dev[idx].x = cursor;
-+				dev[idx].y = 0;
-+				cursor += dev[idx].width;
-+			}
-+		}
-+
-+		/* Primary must be the origin; the others may end up negative. */
-+		for (size_t i = 0; i < nmonitors; i++)
- 		{
--			if (auto* window = _sdl->getFirstWindow())
-+			if (!monitors[i].is_primary)
-+				continue;
-+
-+			const auto dx = dev[i].x;
-+			const auto dy = dev[i].y;
-+			for (auto& d : dev)
  			{
 -				const auto r = window->rect();
 -				if ((r.w > 0) && (r.h > 0))
@@ -213,11 +226,32 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 -					if ((pct >= 100) && (pct <= 500))
 -						desktopScale = pct;
 -				}
++				dev[idx].x = cursor;
++				dev[idx].y = 0;
++				cursor += dev[idx].width;
+ 			}
+ 		}
+ 
+-		layout.Flags = (monitor->is_primary ? DISPLAY_CONTROL_MONITOR_PRIMARY : 0);
+-		layout.Left = monitor->x;
+-		layout.Top = monitor->y;
+-		layout.Width = WINPR_ASSERTING_INT_CAST(uint32_t, width);
+-		layout.Height = WINPR_ASSERTING_INT_CAST(uint32_t, height);
++		/* Primary must be the origin; the others may end up negative. */
++		for (size_t i = 0; i < nmonitors; i++)
++		{
++			if (!monitors[i].is_primary)
++				continue;
++
++			const auto dx = dev[i].x;
++			const auto dy = dev[i].y;
++			for (auto& d : dev)
++			{
 +				d.x -= dx;
 +				d.y -= dy;
- 			}
++			}
 +			break;
- 		}
++		}
 +	}
 +
 +	if (!devValid)
@@ -237,12 +271,8 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +	{
 +		auto monitor = &monitors[i];
 +		DISPLAY_CONTROL_MONITOR_LAYOUT layout = {};
- 
- 		layout.Flags = (monitor->is_primary ? DISPLAY_CONTROL_MONITOR_PRIMARY : 0);
--		layout.Left = monitor->x;
--		layout.Top = monitor->y;
--		layout.Width = WINPR_ASSERTING_INT_CAST(uint32_t, width);
--		layout.Height = WINPR_ASSERTING_INT_CAST(uint32_t, height);
++
++		layout.Flags = ((i == primaryIdx) ? DISPLAY_CONTROL_MONITOR_PRIMARY : 0);
 +		layout.Left = dev[i].x;
 +		layout.Top = dev[i].y;
 +		layout.Width = WINPR_ASSERTING_INT_CAST(uint32_t, dev[i].width);
@@ -250,7 +280,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  		layout.Orientation = ORIENTATION_LANDSCAPE;
  		layout.PhysicalWidth = monitor->attributes.physicalWidth;
  		layout.PhysicalHeight = monitor->attributes.physicalHeight;
-@@ -283,7 +363,7 @@
+@@ -283,7 +392,7 @@
  				break;
  		}
  
