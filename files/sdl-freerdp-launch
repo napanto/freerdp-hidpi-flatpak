@@ -1,0 +1,19 @@
+#!/bin/sh
+# Launcher for sdl-freerdp.
+#
+# FreeRDP mounts the clipboard FUSE filesystem under GetKnownSubPath(
+# KNOWN_PATH_TEMP, ...), which is /tmp -- private to the sandbox, so a mount made
+# by the host helper would not appear there. WinPR's GetPath_TEMP() honours
+# TMPDIR, so point it at the app's cache directory instead: inside the sandbox
+# XDG_CACHE_HOME resolves to the same absolute path as on the host
+# (~/.var/app/com.freerdp.FreeRDP/cache), so one path works on both sides.
+set -eu
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}"
+tmp="$cache/tmp"
+if mkdir -p "$tmp" 2>/dev/null; then
+	TMPDIR="$tmp"
+	export TMPDIR
+fi
+
+exec /app/bin/sdl-freerdp "$@"

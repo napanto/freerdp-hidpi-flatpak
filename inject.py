@@ -33,6 +33,22 @@ FUSE_MODULE = {
     "cleanup": ["/share/man", "/etc/init.d", "/lib/udev"],
 }
 
+# Installed after freerdp so it shadows the fusermount3 that libfuse itself
+# installed, and provides the launcher that redirects TMPDIR.
+FUSE_BRIDGE_MODULE = {
+    "name": "fuse-host-bridge",
+    "buildsystem": "simple",
+    "build-commands": [
+        "install -Dm755 files/fusermount3-host $FLATPAK_DEST/bin/fusermount3",
+        "install -Dm755 files/sdl-freerdp-launch $FLATPAK_DEST/bin/sdl-freerdp-launch",
+    ],
+    "sources": [
+        {"type": "file", "path": "files/fusermount3-host"},
+        {"type": "file", "path": "files/sdl-freerdp-launch"},
+    ],
+}
+
+
 def main(path: str) -> int:
     with open(path) as fh:
         manifest = json.load(fh)
@@ -42,6 +58,9 @@ def main(path: str) -> int:
                if isinstance(m, dict) and m.get("name") == "freerdp")
     if "fuse3" not in names:
         manifest["modules"].insert(idx, FUSE_MODULE)
+        idx += 1
+    if "fuse-host-bridge" not in names:
+        manifest["modules"].insert(idx + 1, FUSE_BRIDGE_MODULE)
 
     for module in manifest["modules"]:
         if not isinstance(module, dict) or module.get("name") != "freerdp":
@@ -66,16 +85,23 @@ def main(path: str) -> int:
 
     # 3. sandbox needs /dev/fuse for the clipboard FUSE mount, and $HOME for /drive
     finish = manifest.setdefault("finish-args", [])
-    for arg in ("--device=all", "--filesystem=home"):
+    # --talk-name=org.freedesktop.Flatpak lets flatpak-spawn reach the host, which
+    # is how the clipboard FUSE mount gets a setuid fusermount3. NOTE: this also
+    # allows running arbitrary host commands, so it weakens the sandbox.
+    for arg in ("--device=all", "--filesystem=home",
+                "--talk-name=org.freedesktop.Flatpak"):
         if arg not in finish:
             finish.append(arg)
+
+    # Route startup through the launcher so TMPDIR lands on a host-visible path.
+    manifest["command"] = "sdl-freerdp-launch"
 
     with open(path, "w") as fh:
         json.dump(manifest, fh, indent=4)
         fh.write("\n")
 
     print(f"patched {path}: +fuse3 module, +{PATCH}, WITH_FUSE=ON, "
-          "+--device=all +--filesystem=home")
+          "+fuse-host-bridge, +--talk-name=org.freedesktop.Flatpak")
     return 0
 
 if __name__ == "__main__":

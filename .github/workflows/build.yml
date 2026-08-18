@@ -51,7 +51,7 @@ jobs:
 
       - name: Apply patch to the manifest
         run: |
-          cp -r patches upstream/
+          cp -r patches files upstream/
           python3 inject.py upstream/com.freerdp.FreeRDP.json
 
       - name: Build
