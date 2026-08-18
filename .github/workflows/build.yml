@@ -26,13 +26,18 @@ jobs:
       - name: Install flatpak + org.flatpak.Builder
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak ostree
+          sudo apt-get install -y flatpak ostree dbus
           flatpak remote-add --if-not-exists --user \
             flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           # Use Flathub's own builder rather than the distro package: the apt
           # flatpak-builder built pcsc such that opensc could not find
           # winscard.h, which does not happen with this one.
           flatpak install --user -y flathub org.flatpak.Builder
+          # Pre-install the runtime/SDK on the host. org.flatpak.Builder would
+          # otherwise shell out to `flatpak install` from inside its own sandbox,
+          # which needs a session bus the runner does not have.
+          flatpak install --user -y flathub \
+            org.freedesktop.Platform/x86_64/25.08 org.freedesktop.Sdk/x86_64/25.08
 
       - name: Fetch latest upstream Flathub manifest
         run: |
@@ -51,8 +56,11 @@ jobs:
 
       - name: Build
         run: |
-          flatpak run org.flatpak.Builder --user --install-deps-from=flathub \
-            --force-clean --default-branch=stable --repo=repo \
+          # dbus-run-session: the builder needs a session bus for any nested
+          # flatpak calls ("Cannot autolaunch D-Bus without X11 $DISPLAY").
+          dbus-run-session -- flatpak run org.flatpak.Builder --user \
+            --install-deps-from=flathub --force-clean \
+            --default-branch=stable --repo=repo \
             build upstream/com.freerdp.FreeRDP.json
 
       - name: Bundle
