@@ -1,0 +1,85 @@
+name: build
+
+on:
+  schedule:
+    # Weekly, Mondays 04:17 UTC. Tracks whatever FreeRDP release Flathub
+    # currently ships instead of pinning a version here.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder ostree
+          flatpak remote-add --if-not-exists --user \
+            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Fetch latest upstream Flathub manifest
+        run: |
+          git clone --depth=1 https://github.com/flathub/com.freerdp.FreeRDP.git upstream
+          UP_SHA=$(git -C upstream rev-parse --short HEAD)
+          FRDP=$(python3 -c "import json;m=json.load(open('upstream/com.freerdp.FreeRDP.json'));print([s['url'] for mod in m['modules'] if isinstance(mod,dict) and mod.get('name')=='freerdp' for s in mod['sources'] if s.get('type')=='archive'][0])")
+          echo "upstream manifest: $UP_SHA"
+          echo "freerdp tarball:   $FRDP"
+          echo "UP_SHA=$UP_SHA" >> "$GITHUB_ENV"
+          echo "FRDP_URL=$FRDP" >> "$GITHUB_ENV"
+
+      - name: Apply patch to the manifest
+        run: |
+          cp -r patches upstream/
+          python3 inject.py upstream/com.freerdp.FreeRDP.json
+
+      - name: Build
+        run: |
+          flatpak-builder --user --install-deps-from=flathub --force-clean \
+            --default-branch=stable --repo=repo \
+            build upstream/com.freerdp.FreeRDP.json
+
+      - name: Bundle
+        run: |
+          flatpak build-bundle repo com.freerdp.FreeRDP-hidpi.flatpak \
+            com.freerdp.FreeRDP stable
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: com.freerdp.FreeRDP-hidpi
+          path: com.freerdp.FreeRDP-hidpi.flatpak
+          retention-days: 30
+
+      - name: Publish OSTree repo to gh-pages
+        run: |
+          flatpak build-update-repo repo --title="FreeRDP (HiDPI patched)"
+          cat > repo/freerdp-hidpi.flatpakrepo <<EOF
+          [Flatpak Repo]
+          Title=FreeRDP (HiDPI patched)
+          Url=https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          Homepage=https://github.com/${{ github.repository }}
+          Comment=Unsigned repo; add with --no-gpg-verify
+          EOF
+          # Orphan commit per run: an OSTree repo is large, so keep no history.
+          cd repo
+          git init -q -b gh-pages
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          touch .nojekyll
+          git add -A
+          git commit -q -m "repo: freerdp ${FRDP_URL##*/} (manifest ${UP_SHA})"
+          git push -q --force \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            gh-pages

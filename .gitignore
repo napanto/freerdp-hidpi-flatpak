@@ -1,0 +1,5 @@
+build/
+repo/
+upstream/
+.flatpak-builder/
+*.flatpak
