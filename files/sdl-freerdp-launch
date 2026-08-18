@@ -16,4 +16,30 @@ if mkdir -p "$tmp" 2>/dev/null; then
 	export TMPDIR
 fi
 
+# VA-API sanity check.
+#
+# The driver comes from org.freedesktop.Platform.GL.*, which the RUNTIME declares
+# with download-if/enable-if = active-gl-driver and merge-dirs including lib/dri
+# -- the very directory in libva's compiled-in search path. So it is present
+# automatically whenever a GL driver is active, and an app manifest cannot
+# declare a dependency on a runtime-owned extension anyway.
+#
+# What it can do is not fail silently: without a driver, FreeRDP decodes H.264 in
+# software and says nothing, which looks like "VA-API is enabled" while it is not.
+va_found=0
+for d in ${LIBVA_DRIVERS_PATH:-} /usr/lib/*-linux-gnu/GL/lib/dri /usr/lib/*-linux-gnu/dri; do
+	[ -d "$d" ] || continue
+	for f in "$d"/*_drv_video.so; do
+		if [ -e "$f" ]; then
+			va_found=1
+			break 2
+		fi
+	done
+done
+if [ "$va_found" -eq 0 ]; then
+	echo "warning: no VA-API driver (*_drv_video.so) found in libva's search path;" >&2
+	echo "         H.264 will be decoded in software. Is a GL driver active on the host" >&2
+	echo "         so flatpak installs org.freedesktop.Platform.GL.default?" >&2
+fi
+
 exec /app/bin/sdl-freerdp "$@"
