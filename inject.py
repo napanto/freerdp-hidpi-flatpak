@@ -39,8 +39,10 @@ FUSE_BRIDGE_MODULE = {
     "name": "fuse-host-bridge",
     "buildsystem": "simple",
     "build-commands": [
-        "install -Dm755 files/fusermount3-host $FLATPAK_DEST/bin/fusermount3",
-        "install -Dm755 files/sdl-freerdp-launch $FLATPAK_DEST/bin/sdl-freerdp-launch",
+        # flatpak-builder copies "type: file" sources into the build directory by
+        # basename, so these must not repeat the files/ prefix.
+        "install -Dm755 fusermount3-host $FLATPAK_DEST/bin/fusermount3",
+        "install -Dm755 sdl-freerdp-launch $FLATPAK_DEST/bin/sdl-freerdp-launch",
     ],
     "sources": [
         {"type": "file", "path": "files/fusermount3-host"},
