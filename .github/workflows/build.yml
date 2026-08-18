@@ -75,6 +75,9 @@ jobs:
           retention-days: 30
 
       - name: Publish OSTree repo to gh-pages
+        # Only main publishes. Branch builds produce the bundle artifact only, so
+        # testing a branch cannot replace the known-good repo on gh-pages.
+        if: github.ref == 'refs/heads/main'
         run: |
           flatpak build-update-repo repo --title="FreeRDP (HiDPI patched)"
           cat > repo/freerdp-hidpi.flatpakrepo <<EOF
