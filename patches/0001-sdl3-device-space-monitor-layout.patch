@@ -112,7 +112,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  
  #include <SDL3/SDL.h>
  
-@@ -172,6 +173,136 @@
+@@ -172,6 +173,161 @@
  	return TRUE;
  }
  
@@ -138,6 +138,41 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +	if (count == 0)
 +		return;
 +
++	/* Decide the primary first, and make the flags agree.
++	 *
++	 * Every SdlWindow caches its monitor built with forceAsPrimary=true
++	 * (SdlWindow::SdlWindow -> query(_window, id, true)), so a layout rebuilt from
++	 * the windows has EVERY entry claiming to be primary. MS-RDPEDISP 2.2.2.2
++	 * allows exactly one and the server discards a layout carrying more, which
++	 * silently costs the per-monitor DPI. Prefer the display SDL considers
++	 * primary, else the first one flagged, else the first entry. */
++	size_t primary = count;
++	const auto sdlPrimary = SDL_GetPrimaryDisplay();
++	for (size_t i = 0; i < count; i++)
++	{
++		if (monitors[i].orig_screen == sdlPrimary)
++		{
++			primary = i;
++			break;
++		}
++	}
++	if (primary == count)
++	{
++		for (size_t i = 0; i < count; i++)
++		{
++			if (monitors[i].is_primary)
++			{
++				primary = i;
++				break;
++			}
++		}
++	}
++	if (primary == count)
++		primary = 0;
++
++	for (size_t i = 0; i < count; i++)
++		monitors[i].is_primary = (i == primary);
++
 +	std::vector<SDL_Rect> logical(count);
 +	for (size_t i = 0; i < count; i++)
 +	{
@@ -146,16 +181,6 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +		if (!SDL_GetDisplayBounds(id, &b) || (b.w <= 0) || (b.h <= 0))
 +			return; /* cannot map reliably, leave the positions alone */
 +		logical[i] = b;
-+	}
-+
-+	size_t primary = 0;
-+	for (size_t i = 0; i < count; i++)
-+	{
-+		if (monitors[i].is_primary)
-+		{
-+			primary = i;
-+			break;
-+		}
 +	}
 +
 +	std::vector<bool> placed(count, false);
@@ -249,7 +274,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  [[nodiscard]] static BOOL sdl_apply_display_properties(SdlContext* sdl)
  {
  	WINPR_ASSERT(sdl);
-@@ -209,6 +340,18 @@
+@@ -209,6 +365,18 @@
  	if (!monitors.empty() && std::none_of(monitors.cbegin(), monitors.cend(),
  	                                      [](const rdpMonitor& m) { return m.is_primary; }))
  		monitors.at(0).is_primary = true;
