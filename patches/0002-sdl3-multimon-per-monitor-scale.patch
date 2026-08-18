@@ -63,7 +63,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  #include <cmath>
  #include <vector>
  #include <winpr/sysinfo.h>
-@@ -197,61 +198,169 @@
+@@ -197,61 +198,202 @@
  	std::vector<DISPLAY_CONTROL_MONITOR_LAYOUT> layouts;
  	layouts.reserve(nmonitors);
  
@@ -162,6 +162,69 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +				cursor += dev[idx].width;
 +			}
 +		}
++
++		/* Primary must be the origin; the others may end up negative. */
++		for (size_t i = 0; i < nmonitors; i++)
++		{
++			if (!monitors[i].is_primary)
++				continue;
++
++			const auto dx = dev[i].x;
++			const auto dy = dev[i].y;
++			for (auto& d : dev)
++			{
++				d.x -= dx;
++				d.y -= dy;
++			}
++			break;
++		}
++	}
++
++	/* The client blits each window from FreeRDP_MonitorDefArray:
++	 * SdlContext::createWindows() does setOffsetX(originX - monitor->x) with
++	 * originX = min(monitor->x, 0). Those are the compositor's LOGICAL positions,
++	 * while the layout above describes the desktop in DEVICE pixels, so on a
++	 * staggered layout the two disagree and every window samples the wrong region
++	 * of the framebuffer -- the monitors look mis-scaled even though the layout the
++	 * server received was correct.
++	 *
++	 * The array itself cannot simply be overwritten: createWindows() also uses
++	 * monitor->width/height as the SDL window size, which must stay in logical
++	 * points. So re-derive just the offsets from the same device-space table.
++	 */
++	if (devValid && (nmonitors > 1))
++	{
++		INT32 originX = 0;
++		INT32 originY = 0;
++		for (size_t i = 0; i < nmonitors; i++)
++		{
++			originX = std::min<INT32>(dev[i].x, originX);
++			originY = std::min<INT32>(dev[i].y, originY);
++		}
++
++		for (size_t i = 0; i < nmonitors; i++)
++		{
++			auto* window = _sdl->getWindowForDisplay(monitors[i].orig_screen);
++			if (!window)
++				continue;
++
++			window->setOffsetX(originX - dev[i].x);
++			window->setOffsetY(originY - dev[i].y);
++		}
++	}
++
++	if (!devValid)
++	{
++		/* At least one monitor has no mapped window yet, so its device size is not
++		 * known. Falling back to the logical monitor definitions here would create
++		 * an undersized session on any fractionally scaled output, and it discards
++		 * the good data gathered for the other monitors. Skip this round instead:
++		 * the DisplayControl retry timer and the window scale/size events call us
++		 * again once the windows have settled. */
++		WLog_Print(_sdl->getWLog(), WLOG_DEBUG,
++		           "monitor layout skipped, window geometry has not settled yet");
++		return true;
++	}
  
 -		/* FreeRDP_MonitorDefArray is enumerated through unmapped dummy windows
 -		 * (SdlWindow::query() -> createDummy()). wp_fractional_scale_v1 is a
@@ -187,52 +250,6 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 -		auto height = monitor->height;
 -		auto desktopScale = monitor->attributes.desktopScaleFactor;
 -		if (nmonitors == 1)
-+		/* Primary must be the origin; the others may end up negative. */
-+		for (size_t i = 0; i < nmonitors; i++)
- 		{
--			if (auto* window = _sdl->getFirstWindow())
-+			if (!monitors[i].is_primary)
-+				continue;
-+
-+			const auto dx = dev[i].x;
-+			const auto dy = dev[i].y;
-+			for (auto& d : dev)
- 			{
--				const auto r = window->rect();
--				if ((r.w > 0) && (r.h > 0))
--				{
--					width = r.w;
--					height = r.h;
--				}
--
--				/* MS-RDPBCGR 2.2.1.3.2: desktopScaleFactor is valid in [100, 500]. */
--				const auto scale = window->scale();
--				if (scale > 0.0f)
--				{
--					const auto pct = static_cast<UINT32>(std::lroundf(scale * 100.0f));
--					if ((pct >= 100) && (pct <= 500))
--						desktopScale = pct;
--				}
-+				d.x -= dx;
-+				d.y -= dy;
- 			}
-+			break;
- 		}
-+	}
-+
-+	if (!devValid)
-+	{
-+		/* At least one monitor has no mapped window yet, so its device size is not
-+		 * known. Falling back to the logical monitor definitions here would create
-+		 * an undersized session on any fractionally scaled output, and it discards
-+		 * the good data gathered for the other monitors. Skip this round instead:
-+		 * the DisplayControl retry timer and the window scale/size events call us
-+		 * again once the windows have settled. */
-+		WLog_Print(_sdl->getWLog(), WLOG_DEBUG,
-+		           "monitor layout skipped, window geometry has not settled yet");
-+		return true;
-+	}
-+
 +	/* MS-RDPEDISP 2.2.2.2 allows exactly one DISPLAY_CONTROL_MONITOR_PRIMARY. The
 +	 * cached SDL monitor definitions can carry the flag on more than one entry,
 +	 * and the server then discards the entire layout -- observed as a /multimon
@@ -253,13 +270,29 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +	if (!primaryFound)
 +	{
 +		for (size_t i = 0; i < nmonitors; i++)
-+		{
+ 		{
+-			if (auto* window = _sdl->getFirstWindow())
 +			if (monitors[i].is_primary)
-+			{
+ 			{
+-				const auto r = window->rect();
+-				if ((r.w > 0) && (r.h > 0))
+-				{
+-					width = r.w;
+-					height = r.h;
+-				}
+-
+-				/* MS-RDPBCGR 2.2.1.3.2: desktopScaleFactor is valid in [100, 500]. */
+-				const auto scale = window->scale();
+-				if (scale > 0.0f)
+-				{
+-					const auto pct = static_cast<UINT32>(std::lroundf(scale * 100.0f));
+-					if ((pct >= 100) && (pct <= 500))
+-						desktopScale = pct;
+-				}
 +				primaryIdx = i;
 +				break;
-+			}
-+		}
+ 			}
+ 		}
 +	}
 +
 +	for (size_t i = 0; i < nmonitors; i++)
@@ -280,7 +313,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  		layout.Orientation = ORIENTATION_LANDSCAPE;
  		layout.PhysicalWidth = monitor->attributes.physicalWidth;
  		layout.PhysicalHeight = monitor->attributes.physicalHeight;
-@@ -283,7 +392,7 @@
+@@ -283,7 +425,7 @@
  				break;
  		}
  
