@@ -23,12 +23,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install flatpak-builder
+      - name: Install flatpak + org.flatpak.Builder
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder ostree
+          sudo apt-get install -y flatpak ostree
           flatpak remote-add --if-not-exists --user \
             flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          # Use Flathub's own builder rather than the distro package: the apt
+          # flatpak-builder built pcsc such that opensc could not find
+          # winscard.h, which does not happen with this one.
+          flatpak install --user -y flathub org.flatpak.Builder
 
       - name: Fetch latest upstream Flathub manifest
         run: |
@@ -47,8 +51,8 @@ jobs:
 
       - name: Build
         run: |
-          flatpak-builder --user --install-deps-from=flathub --force-clean \
-            --default-branch=stable --repo=repo \
+          flatpak run org.flatpak.Builder --user --install-deps-from=flathub \
+            --force-clean --default-branch=stable --repo=repo \
             build upstream/com.freerdp.FreeRDP.json
 
       - name: Bundle
