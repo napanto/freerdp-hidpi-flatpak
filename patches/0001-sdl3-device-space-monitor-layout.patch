@@ -229,12 +229,21 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  [[nodiscard]] static BOOL sdl_apply_display_properties(SdlContext* sdl)
  {
  	WINPR_ASSERT(sdl);
-@@ -209,6 +340,9 @@
+@@ -209,6 +340,18 @@
  	if (!monitors.empty() && std::none_of(monitors.cbegin(), monitors.cend(),
  	                                      [](const rdpMonitor& m) { return m.is_primary; }))
  		monitors.at(0).is_primary = true;
 +
 +	sdl_monitors_to_device_space(monitors);
++
++	/* Per-monitor attributes -- including the desktopScaleFactor computed above --
++	 * are only put on the wire at connect time if this flag is set:
++	 * gcc_write_client_monitor_extended_data() wraps the whole CS_MONITOR_EX block
++	 * in `if (settings->HasMonitorAttributes)`. Nothing on the client side sets it,
++	 * so the DPI silently never reached the server and the session came up
++	 * unscaled, even though the monitor definitions carried the right value. */
++	if (!freerdp_settings_set_bool(settings, FreeRDP_HasMonitorAttributes, TRUE))
++		return FALSE;
 +
  	return freerdp_settings_set_monitor_def_array_sorted(settings, monitors.data(),
  	                                                     monitors.size());
