@@ -63,7 +63,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  #include <cmath>
  #include <vector>
  #include <winpr/sysinfo.h>
-@@ -197,61 +198,202 @@
+@@ -197,61 +198,207 @@
  	std::vector<DISPLAY_CONTROL_MONITOR_LAYOUT> layouts;
  	layouts.reserve(nmonitors);
  
@@ -94,18 +94,32 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +	};
 +	std::vector<DevGeometry> dev(nmonitors);
 +	std::vector<float> scales(nmonitors, 0.0f);
-+	bool devValid = true;
++	bool devValid = true; /* diagnostic only: false = some sizes are still logical */
 +
  	for (size_t i = 0; i < nmonitors; i++)
  	{
 -		auto monitor = &monitors[i];
 -		DISPLAY_CONTROL_MONITOR_LAYOUT layout = {};
++		/* Start from the monitor definition, then improve it if the matching
++		 * window is already mapped. Best-effort per monitor on purpose: with three
++		 * or more displays one window is routinely still unmapped when this first
++		 * runs, and refusing to send anything at all left the session stuck at the
++		 * pre-connect size with blank screens. The position re-tiling below yields
++		 * a valid layout whatever mix of sizes it is given, and sendLayout() runs
++		 * again on later window events, so a partial layout is corrected rather
++		 * than final. */
++		dev[i].x = monitors[i].x;
++		dev[i].y = monitors[i].y;
++		dev[i].width = monitors[i].width;
++		dev[i].height = monitors[i].height;
++		dev[i].desktopScale = monitors[i].attributes.desktopScaleFactor;
++
 +		auto* window = (nmonitors == 1) ? _sdl->getFirstWindow()
 +		                               : _sdl->getWindowForDisplay(monitors[i].orig_screen);
 +		if (!window)
 +		{
 +			devValid = false;
-+			break;
++			continue;
 +		}
 +
 +		const auto r = window->rect();
@@ -113,11 +127,9 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +		if ((r.w <= 0) || (r.h <= 0) || (scale <= 0.0f))
 +		{
 +			devValid = false;
-+			break;
++			continue;
 +		}
 +
-+		dev[i].x = monitors[i].x;
-+		dev[i].y = monitors[i].y;
 +		dev[i].width = r.w;
 +		dev[i].height = r.h;
 +		scales[i] = scale;
@@ -128,12 +140,17 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +		    ((pct >= 100) && (pct <= 500)) ? pct : monitors[i].attributes.desktopScaleFactor;
 +	}
 +
-+	if (devValid && (nmonitors > 1))
++	if (!devValid)
++		WLog_Print(_sdl->getWLog(), WLOG_DEBUG,
++		           "not every monitor has a mapped window yet, sending a partial layout");
++
++	if (nmonitors > 1)
 +	{
 +		const auto first = scales.front();
-+		const bool uniform = std::all_of(scales.begin(), scales.end(), [first](float s) {
-+			return std::fabs(s - first) < 0.01f;
-+		});
++		const bool uniform = (first > 0.0f) &&
++		                     std::all_of(scales.begin(), scales.end(), [first](float s) {
++			                     return (s > 0.0f) && (std::fabs(s - first) < 0.01f);
++		                     });
 +
 +		if (uniform)
 +		{
@@ -192,7 +209,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +	 * monitor->width/height as the SDL window size, which must stay in logical
 +	 * points. So re-derive just the offsets from the same device-space table.
 +	 */
-+	if (devValid && (nmonitors > 1))
++	if (nmonitors > 1)
 +	{
 +		INT32 originX = 0;
 +		INT32 originY = 0;
@@ -201,30 +218,6 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +			originX = std::min<INT32>(dev[i].x, originX);
 +			originY = std::min<INT32>(dev[i].y, originY);
 +		}
-+
-+		for (size_t i = 0; i < nmonitors; i++)
-+		{
-+			auto* window = _sdl->getWindowForDisplay(monitors[i].orig_screen);
-+			if (!window)
-+				continue;
-+
-+			window->setOffsetX(originX - dev[i].x);
-+			window->setOffsetY(originY - dev[i].y);
-+		}
-+	}
-+
-+	if (!devValid)
-+	{
-+		/* At least one monitor has no mapped window yet, so its device size is not
-+		 * known. Falling back to the logical monitor definitions here would create
-+		 * an undersized session on any fractionally scaled output, and it discards
-+		 * the good data gathered for the other monitors. Skip this round instead:
-+		 * the DisplayControl retry timer and the window scale/size events call us
-+		 * again once the windows have settled. */
-+		WLog_Print(_sdl->getWLog(), WLOG_DEBUG,
-+		           "monitor layout skipped, window geometry has not settled yet");
-+		return true;
-+	}
  
 -		/* FreeRDP_MonitorDefArray is enumerated through unmapped dummy windows
 -		 * (SdlWindow::query() -> createDummy()). wp_fractional_scale_v1 is a
@@ -250,6 +243,19 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 -		auto height = monitor->height;
 -		auto desktopScale = monitor->attributes.desktopScaleFactor;
 -		if (nmonitors == 1)
++		for (size_t i = 0; i < nmonitors; i++)
+ 		{
+-			if (auto* window = _sdl->getFirstWindow())
++			auto* window = _sdl->getWindowForDisplay(monitors[i].orig_screen);
++			if (!window)
++				continue;
++
++			window->setOffsetX(originX - dev[i].x);
++			window->setOffsetY(originY - dev[i].y);
++		}
++	}
++
++
 +	/* MS-RDPEDISP 2.2.2.2 allows exactly one DISPLAY_CONTROL_MONITOR_PRIMARY. The
 +	 * cached SDL monitor definitions can carry the flag on more than one entry,
 +	 * and the server then discards the entire layout -- observed as a /multimon
@@ -270,8 +276,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +	if (!primaryFound)
 +	{
 +		for (size_t i = 0; i < nmonitors; i++)
- 		{
--			if (auto* window = _sdl->getFirstWindow())
++		{
 +			if (monitors[i].is_primary)
  			{
 -				const auto r = window->rect();
@@ -313,7 +318,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  		layout.Orientation = ORIENTATION_LANDSCAPE;
  		layout.PhysicalWidth = monitor->attributes.physicalWidth;
  		layout.PhysicalHeight = monitor->attributes.physicalHeight;
-@@ -283,7 +425,7 @@
+@@ -283,7 +430,7 @@
  				break;
  		}
  
