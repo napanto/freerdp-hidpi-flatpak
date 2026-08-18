@@ -63,7 +63,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  #include <cmath>
  #include <vector>
  #include <winpr/sysinfo.h>
-@@ -197,61 +198,261 @@
+@@ -197,61 +198,292 @@
  	std::vector<DISPLAY_CONTROL_MONITOR_LAYOUT> layouts;
  	layouts.reserve(nmonitors);
  
@@ -121,36 +121,11 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +			devValid = false;
 +			continue;
 +		}
- 
--		/* FreeRDP_MonitorDefArray is enumerated through unmapped dummy windows
--		 * (SdlWindow::query() -> createDummy()). wp_fractional_scale_v1 is a
--		 * PER-SURFACE protocol: an unmapped surface never receives the compositor's
--		 * preferred fractional scale, so SDL falls back to the wl_output integer
--		 * scale (1). On a fractionally scaled output the monitor definition then
--		 * carries the LOGICAL size and a desktopScaleFactor of 100. The remote
--		 * desktop is created at 1/scale of the panel -- a 3840x2160 output at scale
--		 * 1.5 yields a 2560x1440 session covering 2/3 of each axis -- and Windows is
--		 * told to use 100% DPI regardless of the real scale.
--		 *
--		 * The mapped window does carry the fractional scale. Take both the size
--		 * (SdlWindow::rect() -> SDL_GetWindowSizeInPixels) and the DPI
--		 * (SdlWindow::scale() -> SDL_GetWindowDisplayScale) from it, so the
--		 * DisplayControl resize requests true device pixels and a DPI matching the
--		 * monitor. An explicit /scale-desktop: still wins via MonitorOverrideFlags
--		 * below.
--		 *
--		 * Restricted to the single-monitor case; multimon would need a per-monitor
--		 * window lookup and is left untouched.
--		 */
--		auto width = monitor->width;
--		auto height = monitor->height;
--		auto desktopScale = monitor->attributes.desktopScaleFactor;
--		if (nmonitors == 1)
++
 +		const auto r = window->rect();
 +		const auto scale = window->scale();
 +		if ((r.w <= 0) || (r.h <= 0) || (scale <= 0.0f))
- 		{
--			if (auto* window = _sdl->getFirstWindow())
++		{
 +			devValid = false;
 +			continue;
 +		}
@@ -189,7 +164,31 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +		                     std::all_of(scales.begin(), scales.end(), [first](float s) {
 +			                     return (s > 0.0f) && (std::fabs(s - first) < 0.01f);
 +		                     });
-+
+ 
+-		/* FreeRDP_MonitorDefArray is enumerated through unmapped dummy windows
+-		 * (SdlWindow::query() -> createDummy()). wp_fractional_scale_v1 is a
+-		 * PER-SURFACE protocol: an unmapped surface never receives the compositor's
+-		 * preferred fractional scale, so SDL falls back to the wl_output integer
+-		 * scale (1). On a fractionally scaled output the monitor definition then
+-		 * carries the LOGICAL size and a desktopScaleFactor of 100. The remote
+-		 * desktop is created at 1/scale of the panel -- a 3840x2160 output at scale
+-		 * 1.5 yields a 2560x1440 session covering 2/3 of each axis -- and Windows is
+-		 * told to use 100% DPI regardless of the real scale.
+-		 *
+-		 * The mapped window does carry the fractional scale. Take both the size
+-		 * (SdlWindow::rect() -> SDL_GetWindowSizeInPixels) and the DPI
+-		 * (SdlWindow::scale() -> SDL_GetWindowDisplayScale) from it, so the
+-		 * DisplayControl resize requests true device pixels and a DPI matching the
+-		 * monitor. An explicit /scale-desktop: still wins via MonitorOverrideFlags
+-		 * below.
+-		 *
+-		 * Restricted to the single-monitor case; multimon would need a per-monitor
+-		 * window lookup and is left untouched.
+-		 */
+-		auto width = monitor->width;
+-		auto height = monitor->height;
+-		auto desktopScale = monitor->attributes.desktopScaleFactor;
+-		if (nmonitors == 1)
 +		if (uniform)
 +		{
 +			for (size_t i = 0; i < nmonitors; i++)
@@ -199,7 +198,8 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +			}
 +		}
 +		else
-+		{
+ 		{
+-			if (auto* window = _sdl->getFirstWindow())
 +			/* Mixed scales: keep the physical arrangement.
 +			 *
 +			 * Scaling every position by one factor cannot work here -- the monitors
@@ -226,9 +226,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +
 +				/* nearest unplaced monitor to anything already placed */
 +				for (size_t m = 0; m < nmonitors; m++)
- 				{
--					width = r.w;
--					height = r.h;
++				{
 +					if (placed[m])
 +						continue;
 +
@@ -247,11 +245,8 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +							bestDist = dist;
 +						}
 +					}
- 				}
- 
--				/* MS-RDPBCGR 2.2.1.3.2: desktopScaleFactor is valid in [100, 500]. */
--				const auto scale = window->scale();
--				if (scale > 0.0f)
++				}
++
 +				if ((best == nmonitors) || (parent == nmonitors))
 +					break;
 +
@@ -263,19 +258,52 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +				const float sy = (pm->height > 0) ? (static_cast<float>(dev[parent].height) /
 +				                                     static_cast<float>(pm->height))
 +				                                  : 1.0f;
-+				const auto offX =
-+				    static_cast<INT32>(std::lroundf(static_cast<float>(mm->x - pm->x) * sx));
-+				const auto offY =
-+				    static_cast<INT32>(std::lroundf(static_cast<float>(mm->y - pm->y) * sy));
++				const float cxr = (mm->width > 0) ? (static_cast<float>(dev[best].width) /
++				                                     static_cast<float>(mm->width))
++				                                  : 1.0f;
++				const float cyr = (mm->height > 0) ? (static_cast<float>(dev[best].height) /
++				                                      static_cast<float>(mm->height))
++				                                   : 1.0f;
 +
-+				if (mm->x >= (pm->x + pm->width)) /* right of parent */
++				/* Where to zero the mismatch along the shared edge.
++				 *
++				 * Neighbours at different scales cannot line up everywhere: the same
++				 * physical span needs a different number of device pixels on each, so
++				 * the error grows linearly across the edge no matter what. Aligning
++				 * the edges puts zero at one end and the whole error at the other;
++				 * aligning the centres splits it symmetrically, halving the worst
++				 * case and putting zero where the pointer usually crosses.
++				 */
++				const auto loX = std::max(mm->x, pm->x);
++				const auto hiX = std::min(mm->x + mm->width, pm->x + pm->width);
++				const auto loY = std::max(mm->y, pm->y);
++				const auto hiY = std::min(mm->y + mm->height, pm->y + pm->height);
++
++				auto offX = static_cast<INT32>(std::lroundf(static_cast<float>(mm->x - pm->x) * sx));
++				auto offY = static_cast<INT32>(std::lroundf(static_cast<float>(mm->y - pm->y) * sy));
++				if (hiX > loX) /* they overlap along x, so a centre exists */
++				{
++					const auto midX = static_cast<float>(loX + hiX) / 2.0f;
++					offX = static_cast<INT32>(std::lroundf((midX - static_cast<float>(pm->x)) * sx -
++					                                       (midX - static_cast<float>(mm->x)) * cxr));
++				}
++				if (hiY > loY)
  				{
--					const auto pct = static_cast<UINT32>(std::lroundf(scale * 100.0f));
--					if ((pct >= 100) && (pct <= 500))
--						desktopScale = pct;
+-					width = r.w;
+-					height = r.h;
++					const auto midY = static_cast<float>(loY + hiY) / 2.0f;
++					offY = static_cast<INT32>(std::lroundf((midY - static_cast<float>(pm->y)) * sy -
++					                                       (midY - static_cast<float>(mm->y)) * cyr));
+ 				}
+ 
+-				/* MS-RDPBCGR 2.2.1.3.2: desktopScaleFactor is valid in [100, 500]. */
+-				const auto scale = window->scale();
+-				if (scale > 0.0f)
++				if (mm->x >= (pm->x + pm->width)) /* right of parent */
++				{
 +					dev[best].x = dev[parent].x + dev[parent].width;
 +					dev[best].y = dev[parent].y + offY;
- 				}
++				}
 +				else if ((mm->x + mm->width) <= pm->x) /* left of parent */
 +				{
 +					dev[best].x = dev[parent].x - dev[best].width;
@@ -287,10 +315,13 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 +					dev[best].x = dev[parent].x + offX;
 +				}
 +				else /* above parent */
-+				{
+ 				{
+-					const auto pct = static_cast<UINT32>(std::lroundf(scale * 100.0f));
+-					if ((pct >= 100) && (pct <= 500))
+-						desktopScale = pct;
 +					dev[best].y = dev[parent].y - dev[best].height;
 +					dev[best].x = dev[parent].x + offX;
-+				}
+ 				}
 +
 +				placed[best] = true;
 +			}
@@ -367,7 +398,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  		layout.Orientation = ORIENTATION_LANDSCAPE;
  		layout.PhysicalWidth = monitor->attributes.physicalWidth;
  		layout.PhysicalHeight = monitor->attributes.physicalHeight;
-@@ -283,7 +484,7 @@
+@@ -283,7 +515,7 @@
  				break;
  		}
  
