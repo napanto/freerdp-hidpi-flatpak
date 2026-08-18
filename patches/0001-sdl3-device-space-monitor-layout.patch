@@ -82,6 +82,26 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  
  	const auto cat = SDL_LOG_CATEGORY_APPLICATION;
  	SDL_LogDebug(cat, "monitor.orig_screen                   %" PRIu32, monitor.orig_screen);
+--- a/client/SDL/SDL3/sdl_monitor.hpp
++++ b/client/SDL/SDL3/sdl_monitor.hpp
+@@ -19,6 +19,8 @@
+ 
+ #pragma once
+ 
++#include <vector>
++
+ #include <freerdp/api.h>
+ #include <freerdp/freerdp.h>
+ 
+@@ -26,3 +28,8 @@
+ 
+ [[nodiscard]] int sdl_list_monitors(SdlContext* sdl);
+ [[nodiscard]] BOOL sdl_detect_monitors(SdlContext* sdl, UINT32* pMaxWidth, UINT32* ppMaxHeight);
++
++/* Convert monitor positions from the compositor's logical coordinates into the
++ * device space the sizes use. Shared, because the layout is rebuilt from the
++ * windows after connecting and has to land in the same coordinate space. */
++void sdl_monitors_to_device_space(std::vector<rdpMonitor>& monitors);
 --- a/client/SDL/SDL3/sdl_monitor.cpp
 +++ b/client/SDL/SDL3/sdl_monitor.cpp
 @@ -26,6 +26,7 @@
@@ -112,7 +132,7 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
 + * overlap splits it symmetrically, halving the worst case and putting zero error
 + * where the pointer usually crosses.
 + */
-+static void sdl_monitors_to_device_space(std::vector<rdpMonitor>& monitors)
++void sdl_monitors_to_device_space(std::vector<rdpMonitor>& monitors)
 +{
 +	const size_t count = monitors.size();
 +	if (count == 0)
@@ -271,3 +291,16 @@ Signed-off-by: Antonio Napolitano <anton@polit.no>
  		if (!(freerdp_settings_get_bool(settings, FreeRDP_UseMultimon) ||
  		      freerdp_settings_get_bool(settings, FreeRDP_Fullscreen)))
  		{
+@@ -458,6 +470,12 @@
+ 	    std::none_of(list.cbegin(), list.cend(), [](const rdpMonitor& m) { return m.is_primary; }))
+ 		list.at(0).is_primary = true;
+ 
++	/* SdlWindow::monitor() reports logical positions, so without this the layout
++	 * rebuilt here would silently replace the device-space one computed at
++	 * enumeration, and everything downstream -- including the DisplayControl
++	 * resize -- would describe the monitors in the wrong coordinate space. */
++	sdl_monitors_to_device_space(list);
++
+ 	return freerdp_settings_set_monitor_def_array_sorted(context()->settings, list.data(),
+ 	                                                     list.size());
+ }
