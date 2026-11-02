@@ -1,0 +1,5 @@
+[Flatpak Repo]
+Title=FreeRDP (HiDPI patched)
+Url=https://napanto.github.io/freerdp-hidpi-flatpak/
+Homepage=https://github.com/napanto/freerdp-hidpi-flatpak
+Comment=Unsigned repo; add with --no-gpg-verify
